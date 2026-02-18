@@ -147,6 +147,7 @@ interface GameState {
   notifications: Notification[]
   controlGroups: { [key: number]: ControlGroup }
   fogOfWar: boolean
+  discoveredTiles: boolean[][] // Track discovered terrain for fog of war
   gameSpeed: number
   upgrades: { player: { attack: number; defense: number; range: number }; enemy: { attack: number; defense: number; range: number } }
   minimapPings: MinimapPing[]
@@ -210,6 +211,15 @@ const BUILDING_STATS: Record<BuildingType, {
 const getDistance = (x1: number, y1: number, x2: number, y2: number) => Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
 const createId = () => Date.now() + Math.random()
+
+// Darken a hex color by a factor (0-1)
+const darkenColor = (hexColor: string, factor: number): string => {
+  const hex = hexColor.replace('#', '')
+  const r = Math.floor(parseInt(hex.substring(0, 2), 16) * factor)
+  const g = Math.floor(parseInt(hex.substring(2, 4), 16) * factor)
+  const b = Math.floor(parseInt(hex.substring(4, 6), 16) * factor)
+  return `rgb(${r}, ${g}, ${b})`
+}
 
 // ==================== SPATIAL GRID FOR COLLISION OPTIMIZATION ====================
 class SpatialGrid {
@@ -331,6 +341,15 @@ function generateGameFromMap(tileMap: Tile[][], seed: number, playerId: string, 
   const playerStartX = playerPos ? playerPos.x * TILE_SIZE : 150
   const playerStartY = playerPos ? playerPos.y * TILE_SIZE : 200
   
+  // Initialize discovered tiles array
+  const discoveredTiles: boolean[][] = []
+  for (let y = 0; y < tileMap.length; y++) {
+    discoveredTiles[y] = []
+    for (let x = 0; x < tileMap[y].length; x++) {
+      discoveredTiles[y][x] = false
+    }
+  }
+  
   return {
     units: [
       createUnit('worker', playerStartX + 50, playerStartY + 100, 'player', playerId),
@@ -349,7 +368,8 @@ function generateGameFromMap(tileMap: Tile[][], seed: number, playerId: string, 
     gameOver: false, winner: null,
     attackMoveMode: false, patrolMode: false, attackGroundMode: false,
     notifications: [], controlGroups: {},
-    fogOfWar: false, gameSpeed: 1,
+    fogOfWar: false, discoveredTiles,
+    gameSpeed: 1,
     upgrades: { player: { attack: 0, defense: 0, range: 0 }, enemy: { attack: 0, defense: 0, range: 0 } },
     minimapPings: [], difficulty: 'normal', gameStarted: false,
     tileMap, mapSeed: seed,
@@ -594,6 +614,7 @@ export default function Home() {
               color: p.color
             }))
             newState.difficulty = data.room.difficulty
+            newState.fogOfWar = true // Force fog of war in multiplayer
             
             // Add enemy player entities
             const enemyPlayer = data.room.players.find((p: any) => p.id !== playerId)
@@ -627,67 +648,86 @@ export default function Home() {
     return () => clearInterval(pollInterval)
   }, [screen, currentRoom, playerId, playerName, handleLeaveRoom])
 
-  // Sync game state for multiplayer
-  const syncGameState = useCallback(async (state: GameState) => {
-    if (!state.isMultiplayer || !state.roomId) return
+  // Sync game state for multiplayer - only sync OWN units/buildings
+  const syncPlayerState = useCallback(async (state: GameState) => {
+    if (!state.isMultiplayer || !state.roomId || !state.playerId) {
+      console.log('Sync skipped: missing required fields', { 
+        isMultiplayer: state.isMultiplayer, 
+        roomId: state.roomId, 
+        playerId: state.playerId 
+      })
+      return
+    }
+    
+    // Only sync this player's units and buildings
+    const myUnits = state.units.filter(u => u.ownerId === state.playerId)
+    const myBuildings = state.buildings.filter(b => b.ownerId === state.playerId)
+    
+    const payload = {
+      action: 'syncPlayer',
+      roomId: state.roomId,
+      playerId: state.playerId,
+      playerState: {
+        units: myUnits,
+        buildings: myBuildings,
+        resources: state.playerResources,
+        upgrades: state.upgrades.player,
+        lastUpdate: Date.now()
+      }
+    }
     
     try {
-      await fetch('/api/multiplayer', {
+      const res = await fetch('/api/multiplayer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'syncGame',
-          roomId: state.roomId,
-          gameState: {
-            units: state.units,
-            buildings: state.buildings,
-            resources: state.resources,
-            projectiles: state.projectiles,
-            playerResources: state.playerResources,
-            enemyResources: state.enemyResources,
-            upgrades: state.upgrades,
-            tick: state.tick,
-            lastUpdate: Date.now(),
-            gameOver: state.gameOver,
-            winner: state.winner
-          }
-        })
+        body: JSON.stringify(payload)
       })
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        console.error('Sync failed:', res.status, errorData)
+      }
     } catch (e) {
-      console.error('Failed to sync state:', e)
+      console.error('Failed to sync player state:', e)
     }
   }, [])
 
-  // Receive game state for multiplayer
-  const receiveGameState = useCallback(async () => {
-    if (!gameState?.isMultiplayer || !gameState.roomId) return
+  // Receive game state for multiplayer - merge opponent's units/buildings
+  const receiveGameState = useCallback(async (currentRoomId: string, currentPlayerId: string) => {
+    if (!currentRoomId || !currentPlayerId) return
     
     try {
-      const res = await fetch(`/api/multiplayer?action=state&roomId=${gameState.roomId}`)
+      const res = await fetch(`/api/multiplayer?action=state&roomId=${currentRoomId}&playerId=${currentPlayerId}`)
       const data = await res.json()
-      if (data.gameState && data.gameState.tick > gameState.tick) {
-        // Merge received state with local state
+      if (data.opponentState) {
+        // Merge opponent's units and buildings into local state
         setGameState(prev => {
           if (!prev) return prev
+          
+          // Keep only our own units/buildings, add opponent's from sync
+          const myUnits = prev.units.filter(u => u.ownerId === prev.playerId)
+          const myBuildings = prev.buildings.filter(b => b.ownerId === prev.playerId)
+          
+          // Opponent's entities come with their ownerId
+          const opponentUnits = data.opponentState.units || []
+          const opponentBuildings = data.opponentState.buildings || []
+          
           return {
             ...prev,
-            units: data.gameState.units,
-            buildings: data.gameState.buildings,
-            resources: data.gameState.resources,
-            projectiles: data.gameState.projectiles,
-            playerResources: data.gameState.playerResources,
-            enemyResources: data.gameState.enemyResources,
-            upgrades: data.gameState.upgrades,
-            tick: data.gameState.tick,
-            gameOver: data.gameState.gameOver,
-            winner: data.gameState.winner
+            units: [...myUnits, ...opponentUnits],
+            buildings: [...myBuildings, ...opponentBuildings],
+            enemyResources: data.opponentState.resources || prev.enemyResources,
+            upgrades: {
+              ...prev.upgrades,
+              enemy: data.opponentState.upgrades || prev.upgrades.enemy
+            }
           }
         })
       }
     } catch (e) {
       console.error('Failed to receive state:', e)
     }
-  }, [gameState])
+  }, [])
 
   // Difficulty settings
   const getDifficultyMultiplier = (difficulty: 'easy' | 'normal' | 'hard') => {
@@ -1258,10 +1298,12 @@ export default function Home() {
       if (timestamp - lastSyncRef.current > SYNC_INTERVAL && gameState?.isMultiplayer) {
         lastSyncRef.current = timestamp
         setGameState(prev => {
-          if (prev) syncGameState(prev)
+          if (prev) syncPlayerState(prev)
           return prev
         })
-        receiveGameState()
+        if (gameState.roomId && gameState.playerId) {
+          receiveGameState(gameState.roomId, gameState.playerId)
+        }
       }
 
       gameLoopRef.current = requestAnimationFrame(gameLoop)
@@ -1269,7 +1311,7 @@ export default function Home() {
 
     gameLoopRef.current = requestAnimationFrame(gameLoop)
     return () => { if (gameLoopRef.current) cancelAnimationFrame(gameLoopRef.current) }
-  }, [screen, gameState?.gameStarted, gameState?.gameSpeed, gameState?.difficulty, addNotification, syncGameState, receiveGameState, gameState?.isMultiplayer])
+  }, [screen, gameState?.gameStarted, gameState?.gameSpeed, gameState?.difficulty, addNotification, syncPlayerState, receiveGameState, gameState?.isMultiplayer, gameState?.roomId, gameState?.playerId])
 
   // ===== RENDER =====
   useEffect(() => {
@@ -1298,23 +1340,38 @@ export default function Home() {
           const screenX = tx * TILE_SIZE - gameState.camera.x
           const screenY = ty * TILE_SIZE - gameState.camera.y
           
+          const centerX = tx * TILE_SIZE + TILE_SIZE / 2
+          const centerY = ty * TILE_SIZE + TILE_SIZE / 2
+          const isVisible = gameState.units.some(u => u.ownerId === gameState.playerId && getDistance(u.x, u.y, centerX, centerY) < VISION_RANGE) ||
+                 gameState.buildings.some(b => b.ownerId === gameState.playerId && getDistance(b.x + b.width/2, b.y + b.height/2, centerX, centerY) < VISION_RANGE)
+          
           if (gameState.fogOfWar) {
-            const centerX = tx * TILE_SIZE + TILE_SIZE / 2
-            const centerY = ty * TILE_SIZE + TILE_SIZE / 2
-            const visible = gameState.units.some(u => u.ownerId === gameState.playerId && getDistance(u.x, u.y, centerX, centerY) < VISION_RANGE) ||
-                           gameState.buildings.some(b => b.ownerId === gameState.playerId && getDistance(b.x + b.width/2, b.y + b.height/2, centerX, centerY) < VISION_RANGE)
-            if (!visible) continue
+            // Update discovered tiles
+            if (isVisible && gameState.discoveredTiles) {
+              gameState.discoveredTiles[ty][tx] = true
+            }
+            
+            // If not visible and not discovered, skip
+            if (!isVisible && !gameState.discoveredTiles?.[ty]?.[tx]) {
+              continue
+            }
           }
           
           const props = TILE_PROPERTIES[tile.type]
-          ctx.fillStyle = props.color
+          
+          // If discovered but not currently visible, render darker
+          if (gameState.fogOfWar && !isVisible && gameState.discoveredTiles?.[ty]?.[tx]) {
+            ctx.fillStyle = darkenColor(props.color, 0.4)
+          } else {
+            ctx.fillStyle = props.color
+          }
           ctx.fillRect(screenX, screenY, TILE_SIZE, TILE_SIZE)
           
           if (tile.type === 'water') {
             ctx.fillStyle = 'rgba(255, 255, 255, 0.1)'
             ctx.fillRect(screenX + 5, screenY + 10, TILE_SIZE - 10, 3)
           } else if (tile.type === 'mountain') {
-            ctx.fillStyle = '#888'
+            ctx.fillStyle = gameState.fogOfWar && !isVisible ? '#555' : '#888'
             ctx.beginPath()
             ctx.moveTo(screenX + TILE_SIZE/2, screenY + 5)
             ctx.lineTo(screenX + 8, screenY + TILE_SIZE - 5)
@@ -2110,6 +2167,8 @@ export default function Home() {
     
     if (e.key === 'm' || e.key === 'M') setGameState(prev => {
       if (!prev) return prev
+      // Don't allow toggling fog of war in multiplayer
+      if (prev.isMultiplayer) return prev
       return { ...prev, fogOfWar: !prev.fogOfWar }
     })
     

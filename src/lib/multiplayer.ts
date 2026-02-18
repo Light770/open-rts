@@ -31,6 +31,12 @@ export interface PlayerGameState {
   lastUpdate: number
 }
 
+// Extended player state that includes team assignment for syncing
+export interface SyncedPlayerState extends PlayerGameState {
+  playerId: string
+  team: 'host' | 'guest'
+}
+
 export interface MultiplayerGameState {
   resources: any[]
   projectiles: any[]
