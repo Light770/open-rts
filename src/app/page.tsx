@@ -636,7 +636,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'sync',
+          action: 'syncGame',
           roomId: state.roomId,
           gameState: {
             units: state.units,
