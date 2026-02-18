@@ -773,10 +773,13 @@ export default function Home() {
       
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}))
-        console.warn('Sync warning:', res.status, errorData.error || 'Unknown error')
+        // Only log if it's a real error (not just room not found during cleanup)
+        if (res.status !== 404 && res.status !== 400) {
+          console.warn('Sync warning:', res.status, errorData.error || 'Unknown error')
+        }
       }
     } catch (e) {
-      console.warn('Sync error:', e)
+      // Silent fail for network errors during gameplay
     }
   }, [])
 
@@ -787,6 +790,12 @@ export default function Home() {
     try {
       const res = await fetch(`/api/multiplayer?action=state&roomId=${currentRoomId}&playerId=${currentPlayerId}`)
       const data = await res.json()
+      
+      if (data.error) {
+        // Room doesn't exist or other error - silent fail
+        return
+      }
+      
       if (data.opponentState) {
         // Merge opponent's units and buildings into local state
         setGameState(prev => {
@@ -813,7 +822,7 @@ export default function Home() {
         })
       }
     } catch (e) {
-      console.error('Failed to receive state:', e)
+      // Silent fail for network errors
     }
   }, [])
 
