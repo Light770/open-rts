@@ -604,32 +604,125 @@ export default function Home() {
           if (data.room.gameStarted) {
             // Initialize game for multiplayer
             const tileMap = generateMapWFC(MAP_TILES_X, MAP_TILES_Y, data.room.mapSeed)
-            const newState = generateGameFromMap(tileMap, data.room.mapSeed, playerId, playerName)
-            newState.isMultiplayer = true
-            newState.roomId = data.room.id
-            newState.players = data.room.players.map((p: any) => ({
-              id: p.id,
-              name: p.name,
-              team: p.team,
-              color: p.color
-            }))
-            newState.difficulty = data.room.difficulty
-            newState.fogOfWar = true // Force fog of war in multiplayer
             
-            // Add enemy player entities
+            // Determine if this player is host or guest
+            const isHost = data.room.host === playerId
+            const myTeam = isHost ? 'host' : 'guest'
+            
+            // Host spawns at 12% (top-left), Guest spawns at 88% (bottom-right)
+            const myTileX = isHost ? Math.floor(MAP_TILES_X * 0.12) : Math.floor(MAP_TILES_X * 0.88)
+            const myTileY = isHost ? Math.floor(MAP_TILES_Y * 0.12) : Math.floor(MAP_TILES_Y * 0.88)
+            const myPos = findPassableArea(tileMap, myTileX, myTileY, 5)
+            const myStartX = myPos ? myPos.x * TILE_SIZE : (isHost ? 150 : MAP_WIDTH - 350)
+            const myStartY = myPos ? myPos.y * TILE_SIZE : (isHost ? 200 : MAP_HEIGHT - 350)
+            
+            // Initialize discovered tiles array
+            const discoveredTiles: boolean[][] = []
+            for (let y = 0; y < tileMap.length; y++) {
+              discoveredTiles[y] = []
+              for (let x = 0; x < tileMap[y].length; x++) {
+                discoveredTiles[y][x] = false
+              }
+            }
+            
+            // Extract resources from tile map
+            const resources: Resource[] = []
+            let resourceId = 1000
+            for (let y = 0; y < tileMap.length; y++) {
+              for (let x = 0; x < tileMap[y].length; x++) {
+                const tile = tileMap[y][x]
+                if (tile.type === 'gold' && tile.resourceAmount) {
+                  resources.push({
+                    id: resourceId++,
+                    x: x * TILE_SIZE,
+                    y: y * TILE_SIZE,
+                    type: 'gold',
+                    amount: tile.resourceAmount,
+                    width: TILE_SIZE,
+                    height: TILE_SIZE
+                  })
+                } else if (tile.type === 'forest' && tile.resourceAmount) {
+                  resources.push({
+                    id: resourceId++,
+                    x: x * TILE_SIZE,
+                    y: y * TILE_SIZE,
+                    type: 'tree',
+                    amount: tile.resourceAmount,
+                    width: TILE_SIZE,
+                    height: TILE_SIZE
+                  })
+                }
+              }
+            }
+            
+            // Create player's own units and buildings at their spawn position
+            const myUnits: Unit[] = [
+              createUnit('worker', myStartX + 50, myStartY + 100, 'player', playerId),
+              createUnit('worker', myStartX + 100, myStartY + 100, 'player', playerId),
+              createUnit('worker', myStartX + 50, myStartY + 150, 'player', playerId),
+              createUnit('soldier', myStartX + 130, myStartY + 120, 'player', playerId),
+            ]
+            const myBuildings: Building[] = [
+              createBuilding('base', myStartX, myStartY, 'player', playerId, true)
+            ]
+            
+            // Add enemy player entities at opposite position
             const enemyPlayer = data.room.players.find((p: any) => p.id !== playerId)
             if (enemyPlayer) {
-              const enemyTileX = Math.floor(MAP_TILES_X * 0.88)
-              const enemyTileY = Math.floor(MAP_TILES_Y * 0.88)
-              const enemyPos = findPassableArea(newState.tileMap, enemyTileX, enemyTileY, 5)
-              const enemyStartX = enemyPos ? enemyPos.x * TILE_SIZE : MAP_WIDTH - 350
-              const enemyStartY = enemyPos ? enemyPos.y * TILE_SIZE : MAP_HEIGHT - 350
+              // Enemy spawns at opposite corner
+              const enemyTileX = isHost ? Math.floor(MAP_TILES_X * 0.88) : Math.floor(MAP_TILES_X * 0.12)
+              const enemyTileY = isHost ? Math.floor(MAP_TILES_Y * 0.88) : Math.floor(MAP_TILES_Y * 0.12)
+              const enemyPos = findPassableArea(tileMap, enemyTileX, enemyTileY, 5)
+              const enemyStartX = enemyPos ? enemyPos.x * TILE_SIZE : (isHost ? MAP_WIDTH - 350 : 150)
+              const enemyStartY = enemyPos ? enemyPos.y * TILE_SIZE : (isHost ? MAP_HEIGHT - 350 : 200)
               
-              newState.buildings.push(createBuilding('base', enemyStartX, enemyStartY, 'enemy', enemyPlayer.id, true))
-              newState.buildings.push(createBuilding('barracks', enemyStartX - 100, enemyStartY + 50, 'enemy', enemyPlayer.id, true))
-              newState.units.push(createUnit('worker', enemyStartX + 50, enemyStartY + 100, 'enemy', enemyPlayer.id))
-              newState.units.push(createUnit('worker', enemyStartX + 100, enemyStartY + 100, 'enemy', enemyPlayer.id))
-              newState.units.push(createUnit('soldier', enemyStartX + 130, enemyStartY + 120, 'enemy', enemyPlayer.id))
+              myBuildings.push(createBuilding('base', enemyStartX, enemyStartY, 'enemy', enemyPlayer.id, true))
+              myBuildings.push(createBuilding('barracks', enemyStartX - 100, enemyStartY + 50, 'enemy', enemyPlayer.id, true))
+              myUnits.push(createUnit('worker', enemyStartX + 50, enemyStartY + 100, 'enemy', enemyPlayer.id))
+              myUnits.push(createUnit('worker', enemyStartX + 100, enemyStartY + 100, 'enemy', enemyPlayer.id))
+              myUnits.push(createUnit('soldier', enemyStartX + 130, enemyStartY + 120, 'enemy', enemyPlayer.id))
+            }
+            
+            const newState: GameState = {
+              units: myUnits,
+              buildings: myBuildings,
+              resources,
+              projectiles: [],
+              playerResources: { gold: 200, wood: 100, supply: 5, maxSupply: 10 },
+              enemyResources: { gold: 200, wood: 100, supply: 5, maxSupply: 10 },
+              camera: { x: Math.max(0, myStartX - 100), y: Math.max(0, myStartY - 100) },
+              mapSize: { width: MAP_WIDTH, height: MAP_HEIGHT },
+              selectionBox: null,
+              placingBuilding: null,
+              gameOver: false,
+              winner: null,
+              attackMoveMode: false,
+              patrolMode: false,
+              attackGroundMode: false,
+              notifications: [],
+              controlGroups: {},
+              fogOfWar: true, // Force fog of war in multiplayer
+              discoveredTiles,
+              gameSpeed: 1,
+              upgrades: { player: { attack: 0, defense: 0, range: 0 }, enemy: { attack: 0, defense: 0, range: 0 } },
+              minimapPings: [],
+              difficulty: data.room.difficulty,
+              gameStarted: false,
+              tileMap,
+              mapSeed: data.room.mapSeed,
+              isMultiplayer: true,
+              playerId,
+              playerName,
+              roomId: data.room.id,
+              players: data.room.players.map((p: any) => ({
+                id: p.id,
+                name: p.name,
+                team: p.team,
+                color: p.color
+              })),
+              tick: 0,
+              chatMessages: [],
+              syncPending: false
             }
             
             newState.gameStarted = true
@@ -1635,12 +1728,17 @@ export default function Home() {
       canvas.height * minimapScale
     )
     
+    // Only show opponent entities on minimap if visible (fog of war)
     gameState.buildings.forEach(b => {
+      // Always show own buildings, only show opponent buildings if visible
+      if (b.ownerId !== gameState.playerId && !isVisible(b.x, b.y)) return
       minimapCtx.fillStyle = b.ownerId === gameState.playerId ? '#00f' : '#f00'
       minimapCtx.fillRect(b.x * minimapScale - 3, b.y * minimapScale - 3, 6, 6)
     })
     
     gameState.units.forEach(u => {
+      // Always show own units, only show opponent units if visible
+      if (u.ownerId !== gameState.playerId && !isVisible(u.x, u.y)) return
       minimapCtx.fillStyle = u.ownerId === gameState.playerId ? '#0f0' : '#f00'
       minimapCtx.fillRect(u.x * minimapScale - 1, u.y * minimapScale - 1, 3, 3)
     })
