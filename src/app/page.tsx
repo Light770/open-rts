@@ -428,7 +428,7 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false)
   const [ctrlPressed, setCtrlPressed] = useState(false)
   const [shiftPressed, setShiftPressed] = useState(false)
-  const gameLoopRef = useRef<number>()
+  const gameLoopRef = useRef<number | undefined>(undefined)
   const lastTimeRef = useRef<number>(0)
   const lastSyncRef = useRef<number>(0)
   const imagesRef = useRef<{ [key: string]: HTMLImageElement }>({})
@@ -744,11 +744,6 @@ export default function Home() {
   // Sync game state for multiplayer - only sync OWN units/buildings
   const syncPlayerState = useCallback(async (state: GameState) => {
     if (!state.isMultiplayer || !state.roomId || !state.playerId) {
-      console.log('Sync skipped: missing required fields', { 
-        isMultiplayer: state.isMultiplayer, 
-        roomId: state.roomId, 
-        playerId: state.playerId 
-      })
       return
     }
     
@@ -778,10 +773,10 @@ export default function Home() {
       
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}))
-        console.error('Sync failed:', res.status, errorData)
+        console.warn('Sync warning:', res.status, errorData.error || 'Unknown error')
       }
     } catch (e) {
-      console.error('Failed to sync player state:', e)
+      console.warn('Sync error:', e)
     }
   }, [])
 
@@ -1203,7 +1198,7 @@ export default function Home() {
           }
           
           // Worker gathering
-          if (u.type === 'worker' && u.team === prevState.playerId === u.ownerId ? 'player' : 'enemy' && !u.repairTarget) {
+          if (u.type === 'worker' && u.ownerId === prevState.playerId && !u.repairTarget) {
             if (u.returningToBase && u.carryingAmount > 0) {
               const base = updatedBuildings.find(b => b.ownerId === u.ownerId && (b.type === 'base' || b.type === 'farm'))
               if (base) {
@@ -1351,7 +1346,7 @@ export default function Home() {
               if (d < minBuildingDist) { minBuildingDist = d; nearestBuilding = b }
             })
             
-            if (enemyUnit.type === 'catapult' && nearestBuilding && !enemyUnit.attackGroundX) {
+            if (enemyUnit.type === 'catapult' && nearestBuilding) {
               updatedUnits[idx] = { ...updatedUnits[idx], attackGroundX: nearestBuilding.x + nearestBuilding.width/2, attackGroundY: nearestBuilding.y + nearestBuilding.height/2 }
             } else if (nearestPlayer && minDist < 400) {
               updatedUnits[idx] = { ...updatedUnits[idx], attackTarget: nearestPlayer }
@@ -1391,12 +1386,12 @@ export default function Home() {
       if (timestamp - lastSyncRef.current > SYNC_INTERVAL && gameState?.isMultiplayer) {
         lastSyncRef.current = timestamp
         setGameState(prev => {
-          if (prev) syncPlayerState(prev)
+          if (prev && prev.roomId && prev.playerId) {
+            syncPlayerState(prev)
+            receiveGameState(prev.roomId, prev.playerId)
+          }
           return prev
         })
-        if (gameState.roomId && gameState.playerId) {
-          receiveGameState(gameState.roomId, gameState.playerId)
-        }
       }
 
       gameLoopRef.current = requestAnimationFrame(gameLoop)
